@@ -12,6 +12,7 @@
 
 It does not hardcode syscall numbers. It does not rely on a pre-computed table. It derives everything from the running system at runtime, meaning it works across Windows versions without modification.
 
+**  FOR AUTHORIZED SECURITY TESTING AND EDUCATIONAL PURPOSES ONLY. **
 ---
 
 ## Relationship to Jake Swiz (0xXyc)
@@ -66,7 +67,7 @@ Same engine. Different destination. His trilogy gives you the locomotion; Hades 
 7. [Variants and Bypasses](#7-variants-and-bypasses)
 8. [Limitations and Detection](#8-limitations-and-detection)
 9. [References](#9-references)
-10. [License](#10-license)
+10. [DISCLAIMER](#10-disclaimer)
 
 ---
 
@@ -544,11 +545,9 @@ __writegsqword(0x18, 0); // Clear DR1
 
 ---
 
-## 10. License
+## 10. DISCLAIMER
 
-This is free software. Do what you want with it. No warranty, express or implied.
-
-The Windows kernel is the only authority. Go directly to it. Do not pass EDR. Do not collect 0-day.
+ FOR AUTHORIZED SECURITY TESTING AND EDUCATIONAL PURPOSES ONLY.
 
 ---
 
