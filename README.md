@@ -4,6 +4,8 @@
 
 > "The gate to the underworld is open. Walk through it without knocking."
 
+**Discalimer: for esucational purposes and authorized security testing**
+
 ---
 
 ## Abstract
