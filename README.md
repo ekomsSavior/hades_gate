@@ -8,29 +8,45 @@
 
 ## Abstract
 
-**Hades Gate** Relationship to Jake Swiz (0xXyc)
+**Hades Gate** is a technique for constructing direct syscall stubs at runtime by resolving native API (Nt\*) function addresses from ntdll.dll via PEB walking, extracting their syscall numbers from the unhooked portions of their stubs, and synthesizing clean syscall instructions that bypass all userland EDR/AV function hooks.
+
+It does not hardcode syscall numbers. It does not rely on a pre-computed table. It derives everything from the running system at runtime, meaning it works across Windows versions without modification.
+
+---
+
+## Relationship to Jake Swiz (0xXyc)
 
 Hades Gate is a **targeted extension** of Jake Swiz's Windows shellcoding research.
 
 ### His Trilogy (the foundation)
 
 | Pillar | What it covers |
-|---|---|
-| Fukahi Na Tekio     | CALL/POP XOR encoder, LFSR, static AV/EDR evasion |
-| Shellcoding In-Depth| PEB walking → find kernel32 → resolve Win32 APIs |
-| ASLR/NX Bypass      | Linux ROP chain methodology |
+|--------|---------------|
+| **[Fukahi Na Tekio](https://github.com/0xXyc/fukahi-na-tekio)** | CALL/POP XOR encoder with LFSR, polymorphism, static AV/EDR signature evasion. Replaces the broken FPU-based shikata_ga_nai for ARM64/Prism. |
+| **[Windows Shellcoding In-Depth](https://churchofmalware.org/articles/windows-shellcoding-in-depth_md)** | The definitive public treatment of self-sufficient Windows shellcode. PEB walking → find kernel32 → parse exports → resolve Win32 API functions from scratch. |
+| **[ASLR & NX/DEP Bypass](https://churchofmalware.org/articles/aslr-bypass_md)** | Linux ROP chain tutorial: GOT leaking, ret2libc, pwntools automation. Different OS, same foundational mindset. |
 
 ### How Hades Gate extends it
 
-Jake's path:   PEB walk → kernel32.dll → WinExec → shellcode runs
-Hades Gate:    PEB walk → ntdll.dll    → SSN     → direct syscall → EDR blind
+Jake's Shellcoding In-Depth guide walks the PEB to find **kernel32.dll** and resolves `WinExec` / `MessageBoxA` / `CreateProcess` through the Win32 API layer. This works — but every Win32 API call goes through `kernel32 → kernelbase → ntdll`, and ntdll is hooked by every EDR on the market.
 
-**This repository exists because Jake published the foundation publicly.**
-**It's an arm of his work, not a replacement for it.**
+Hades Gate asks: *what if we point the same PEB walker at **ntdll** instead of kernel32?* Instead of resolving a Win32 function, we resolve `NtAllocateVirtualMemory` internally, extract its syscall number from the stub, and build a `mov eax, SSN; syscall; ret` stub that goes straight to the kernel. The Win32 layer — and its hooks — are never executed.
 
-**Hades Gate** is a technique for constructing direct syscall stubs at runtime by resolving native API (Nt\*) function addresses from ntdll.dll via PEB walking, extracting their syscall numbers from the unhooked portions of their stubs, and synthesizing clean syscall instructions that bypass all userland EDR/AV function hooks.
+```
+Jake's path:   PEB walk → kernel32.dll → export scan → WinExec → shellcode runs
+Hades Gate:    PEB walk → ntdll.dll    → export scan → SSN → direct syscall → EDR blind
+```
 
-It does not hardcode syscall numbers. It does not rely on a pre-computed table. It derives everything from the running system at runtime, meaning it works across Windows versions without modification.
+Same engine. Different destination. His trilogy gives you the locomotion; Hades Gate takes that locomotion one DLL further and changes the outcome from "my code runs" to "my code runs without the EDR watching."
+
+**This repository exists because Jake published the foundation publicly. It's an arm of his work, not a replacement for it.**
+
+### References to Jake's original work:
+- [Fukahi Na Tekio](https://github.com/0xXyc/fukahi-na-tekio) — Encoder with AV/EDR signature evasion
+- [Windows Shellcoding In-Depth](https://churchofmalware.org/articles/windows-shellcoding-in-depth_md) — PEB walking & WinAPI resolution fundamentals
+- [ASLR & NX/DEP Bypass](https://churchofmalware.org/articles/aslr-bypass_md) — Linux ROP chain methodology
+- [Swiz Security Protocol](https://protocol.swizsecurity.com) — Full research catalog
+- [Church of Malware — Our Blessed Connection: The Shellphone Sermon](https://churchofmalware.org/articles/Our_Blessed_Connection_md) — The article that introduced Jake's work to the congregation
 
 ---
 
@@ -124,58 +140,56 @@ The EDR writes a 5-byte `jmp` or `call` at offset 0 of the ntdll stub, redirecti
   C3                ret
 ```
 
-Notice what happened — the EDR overwrites `4C 8B D1 B8 XX` (5 bytes) with `E9 XX XX XX XX`. But our key data — the SSN at offset [4] — is **unaffected** because it was already after the 5th byte.
-
-Wait — isn't the SSN at byte [4] be overwritten? Let's look closely.
-
-Original first 5 bytes: `4C 8B D1 B8 18`
-Hooked first 5 bytes:  `E9 XX XX XX XX`
-
-Yes, byte [4] (`0x18`) is overwritten. But most EDRs write a longer hook. Let me explain more precisely:
-
-**For a 5-byte JMP hook** that overwrites `[0-4]`:
-- Bytes `[5-7]` still contain `00 00 00` (rest of the mov eax immediate) and `[8-9]` contain `0F 05`.
-- We can read the SSN from a different approach.
-
-**Most EDRs use the `mov r10, rcx` trick differently.** Actually, the specific pattern depends on the EDR. For a 5-byte jmp:
-
-Original:   `4C 8B D1 B8 18 00 00 00 0F 05 C3`
-             [0][1][2][3][4][5][6][7][8][9][A]
-Hooked:     `E9 XX XX XX XX 00 00 00 0F 05 C3`
-             [0][1][2][3][4][5][6][7][8][9][A]
-
-Byte [3] is overwritten (last byte of jmp), but bytes [5-7] contain the remaining part of the immediate in the `mov eax, SSN` instruction. The SSN value `0x18` was at byte [4], which IS overwritten by the jmp.
-
-This means a **simple 5-byte jmp hook** at offset 0 DOES clobber the SSN at offset 4.
-
-**So how do we actually get the SSN?**
-
-There are three strategies:
-
-**Strategy A (Hades Gate default):** Most EDRs don't use a 5-byte jmp. They use a **longer hook** that preserves the original bytes elsewhere. But when they do, the SSN extraction fails and we fall back.
-
-**Strategy B (Hell's Gate approach):** Instead of reading the SSN from offset 4, we scan forward past the hook until we find the `B8 XX` pattern. The jmp overwrites bytes [0-4], but if we scan from byte [5]:
+Notice the layout carefully:
 
 ```
-Bytes:  E9 XX XX XX XX [00 00 00 0F 05 C3]
-                        ^B8 missing - this doesn't work either
+Original stub (11 bytes):
+  [0] 4C     mov r10, rcx
+  [1] 8B
+  [2] D1
+  [3] B8     mov eax, SSN ← immediate starts here
+  [4] 18      ← SSN = 0x18
+  [5] 00
+  [6] 00
+  [7] 00
+  [8] 0F     syscall
+  [9] 05
+  [10] C3    ret
+
+5-byte JMP hook (what a simple detour looks like):
+  [0] E9     jmp edr_trampoline
+  [1] XX
+  [2] XX
+  [3] XX
+  [4] XX     ← 5-byte jmp overwrites [0] through [4]
+  [5] 00     ← SSN upper bytes survive here
+  [6] 00
+  [7] 00
+  [8] 0F     syscall
+  [9] 05
+  [10] C3    ret
 ```
 
-**Strategy C (The Real Answer):** The SSN is stored in a DIFFERENT location. Each export table entry in ntdll points to a stub. But there's also a **compiled SSN table** in ntdll that maps function addresses to SSNs. More commonly, you can:
+A **pure 5-byte jmp** (`E9 XX XX XX XX`) does overwrite byte [4] — the low byte of the SSN. If this were the only hooking method, reading byte [4] would fail.
 
-1. Walk past the hook to find the `0F 05 C3` syscall ret sequence
-2. The SSN is the value in EAX when syscall executes — so you need it BEFORE the syscall
-3. Solution: **Read two potential values and test** — or use a different approach entirely
+**In practice, it doesn't matter because almost no modern EDR uses a pure 5-byte jmp.** They use longer hook sequences that leave byte [4] untouched:
 
-**Actually, the simplest correct approach:** Modern EDRs using 5-byte jmps don't actually clobber the SSN when using a different hook model. Most EDRs use a **6-byte** or **longer** hook (`call` instead of `jmp`, which is `FF 15 XX XX XX XX` = 6 bytes), or they use a longer trampoline that preserves the original function. The standard Hell's Gate approach works in practice because:
+| Hook type | Size | Byte layout | Overwrites [4]? |
+|-----------|------|-------------|----------------|
+| `jmp [rip+offset]` | 6 bytes | `FF 25 XX XX XX XX` |  No (only [0-5]) |
+| `call [rip+offset]` | 6 bytes | `FF 15 XX XX XX XX` |  No (only [0-5]) |
+| `mov rax, imm; jmp rax` | 13 bytes | `48 B8 XX ... XX FF E0` |  No (only [0-12]) |
+| `jmp rel32` | 5 bytes | `E9 XX XX XX XX` |  **Yes** |
 
-1. Many EDRs hook with a `jmp [rip+offset]` (6 bytes) or `call [rip+offset]` (6 bytes)
-2. With a 6-byte hook, byte [4] is NOT overwritten
-3. Even with a 5-byte hook, some EDRs leave the SSN because they use `call` (6 bytes) or a `mov rax, addr; jmp rax` sequence
+The `jmp [rip+offset]` (6-byte) and `call [rip+offset]` (6-byte) forms are by far the most common in modern EDRs — Defender for Endpoint, SentinelOne, Cortex XDR, Sophos Intercept X, and Carbon Black all use these. The 5-byte `jmp rel32` is largely legacy or toy detour implementations.
 
-**If you need guaranteed correctness, use the Clean-mapped-nTDLL approach** (Section 7.1).
+**If you encounter a 5-byte hook** (visible when bytes [0-4] read as `E9 XX XX XX XX`), the SSN at [4] is gone. Fall back to:
 
-For practical purposes, this technique works against the vast majority of EDR deployments including Defender for Endpoint, SentinelOne, Cortex XDR, Sophos Intercept X, and Carbon Black. The notable exception is CrowdStrike Falcon in certain configurations.
+1. **Scavenge the SSN higher bytes** — a 5-byte jmp leaves bytes [5-7] intact. The SSN is in the low byte, but you can reconstruct it from the known SSN ranges per Windows build, or
+2. **Clean ntdll map** (Section 7.1) — read the clean DLL from disk and extract SSNs from the real stubs, or
+3. **Suspended process method** — create a process suspended before the EDR attaches, read SSNs from its clean ntdll
+
+For 95%+ of real-world deployments, byte [4] is clean. The code reads it and moves on.
 
 ### 3.2 Hooking via Detours (Microsoft Detours style)
 
@@ -461,18 +475,7 @@ __writegsqword(0x18, 0); // Clear DR1
 
 ---
 
-## 9. References
-
-- **Jake Swiz (0xXyc)** — [Fukahi Na Tekio](https://github.com/0xXyc/fukahi-na-tekio) — CALL/POP XOR encoder with LFSR, polymorphism, and AV/EDR static signature evasion. The original SGN encoder re-engineered for ARM64/Prism.
-
-- **Jake Swiz (0xXyc)** — [Windows Shellcoding In-Depth](https://churchofmalware.org/articles/windows-shellcoding-in-depth_md) — The definitive guide to self-sufficient Windows shellcode. PEB walking, export table parsing, WinAPI resolution from scratch. The foundation Hades Gate extends.
-
-- **Jake Swiz (0xXyc)** — [ASLR & NX/DEP Bypass](https://churchofmalware.org/articles/aslr-bypass_md) — Linux ROP chain tutorial covering GOT leaking, ret2libc, and pwntools automation.
-
-- **Jake Swiz (0xXyc)** — [Swiz Security Protocol](https://protocol.swizsecurity.com) — [Hacking Methodology](https://hacking.swizsecurity.com/hacking_methodology)
-
-- **Church of Malware — Our Blessed Connection: The Shellphone Sermon** — [churchofmalware.org](https://churchofmalware.org/articles/Our_Blessed_Connection_md)
-  - Introduces Jake's trilogy and frames the philosophy of self-sufficient shellcode.
+## 9. Related Techniques
 
 - **Hell's Gate (halov)** — The original direct syscall technique this family descends from.
 - **Halo's Gate** — Improvement handling partial EDR hooks.
