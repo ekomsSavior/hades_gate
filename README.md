@@ -177,10 +177,10 @@ A **pure 5-byte jmp** (`E9 XX XX XX XX`) does overwrite byte [4] — the low byt
 
 | Hook type | Size | Byte layout | Overwrites [4]? |
 |-----------|------|-------------|----------------|
-| `jmp [rip+offset]` | 6 bytes | `FF 25 XX XX XX XX` | ❌ No (only [0-5]) |
-| `call [rip+offset]` | 6 bytes | `FF 15 XX XX XX XX` | ❌ No (only [0-5]) |
-| `mov rax, imm; jmp rax` | 13 bytes | `48 B8 XX ... XX FF E0` | ❌ No (only [0-12]) |
-| `jmp rel32` | 5 bytes | `E9 XX XX XX XX` | ✅ **Yes** |
+| `jmp [rip+offset]` | 6 bytes | `FF 25 XX XX XX XX` |  No (only [0-5]) |
+| `call [rip+offset]` | 6 bytes | `FF 15 XX XX XX XX` |  No (only [0-5]) |
+| `mov rax, imm; jmp rax` | 13 bytes | `48 B8 XX ... XX FF E0` |  No (only [0-12]) |
+| `jmp rel32` | 5 bytes | `E9 XX XX XX XX` |  **Yes** |
 
 The `jmp [rip+offset]` (6-byte) and `call [rip+offset]` (6-byte) forms are by far the most common in modern EDRs — Defender for Endpoint, SentinelOne, Cortex XDR, Sophos Intercept X, and Carbon Black all use these. The 5-byte `jmp rel32` is largely legacy or toy detour implementations.
 
