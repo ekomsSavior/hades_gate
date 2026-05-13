@@ -8,6 +8,26 @@
 
 ## Abstract
 
+**Hades Gate** Relationship to Jake Swiz (0xXyc)
+
+Hades Gate is a **targeted extension** of Jake Swiz's Windows shellcoding research.
+
+### His Trilogy (the foundation)
+
+| Pillar | What it covers |
+|---|---|
+| Fukahi Na Tekio     | CALL/POP XOR encoder, LFSR, static AV/EDR evasion |
+| Shellcoding In-Depth| PEB walking → find kernel32 → resolve Win32 APIs |
+| ASLR/NX Bypass      | Linux ROP chain methodology |
+
+### How Hades Gate extends it
+
+Jake's path:   PEB walk → kernel32.dll → WinExec → shellcode runs
+Hades Gate:    PEB walk → ntdll.dll    → SSN     → direct syscall → EDR blind
+
+**This repository exists because Jake published the foundation publicly.**
+**It's an arm of his work, not a replacement for it.**
+
 **Hades Gate** is a technique for constructing direct syscall stubs at runtime by resolving native API (Nt\*) function addresses from ntdll.dll via PEB walking, extracting their syscall numbers from the unhooked portions of their stubs, and synthesizing clean syscall instructions that bypass all userland EDR/AV function hooks.
 
 It does not hardcode syscall numbers. It does not rely on a pre-computed table. It derives everything from the running system at runtime, meaning it works across Windows versions without modification.
