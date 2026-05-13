@@ -4,8 +4,6 @@
 
 > "The gate to the underworld is open. Walk through it without knocking."
 
-**Discalimer: for Educational purposes and authorized security testing**
-
 ---
 
 ## Abstract
@@ -178,10 +176,10 @@ A **pure 5-byte jmp** (`E9 XX XX XX XX`) does overwrite byte [4] — the low byt
 
 | Hook type | Size | Byte layout | Overwrites [4]? |
 |-----------|------|-------------|----------------|
-| `jmp [rip+offset]` | 6 bytes | `FF 25 XX XX XX XX` |  No (only [0-5]) |
-| `call [rip+offset]` | 6 bytes | `FF 15 XX XX XX XX` |  No (only [0-5]) |
-| `mov rax, imm; jmp rax` | 13 bytes | `48 B8 XX ... XX FF E0` |  No (only [0-12]) |
-| `jmp rel32` | 5 bytes | `E9 XX XX XX XX` |  **Yes** |
+| `jmp [rip+offset]` | 6 bytes | `FF 25 XX XX XX XX` | ❌ No (only [0-5]) |
+| `call [rip+offset]` | 6 bytes | `FF 15 XX XX XX XX` | ❌ No (only [0-5]) |
+| `mov rax, imm; jmp rax` | 13 bytes | `48 B8 XX ... XX FF E0` | ❌ No (only [0-12]) |
+| `jmp rel32` | 5 bytes | `E9 XX XX XX XX` | ✅ **Yes** |
 
 The `jmp [rip+offset]` (6-byte) and `call [rip+offset]` (6-byte) forms are by far the most common in modern EDRs — Defender for Endpoint, SentinelOne, Cortex XDR, Sophos Intercept X, and Carbon Black all use these. The 5-byte `jmp rel32` is largely legacy or toy detour implementations.
 
@@ -381,13 +379,57 @@ See `examples/injector.c` for a full implementation that opens a target process,
 
 - **You need cross-version compatibility.** Because Hades Gate derives syscall numbers at runtime, the same binary works on Windows 10 1507, Windows 11 24H2, and everything in between. No hardcoded offset tables to maintain.
 
-### Don't use Hades Gate when:
+### Know your enemy — what lurks below userland
 
-- **The EDR uses kernel-mode callbacks** (most do now). Direct syscalls bypass *userland* hooks, but the kernel still generates ETW events for process creation, memory allocation, and thread creation. You need kernel callout bypasses too — that's a different problem for a different tool.
+Hades Gate bypasses userland API hooks. There are three layers below that it **does not touch**. Here's how to handle each:
 
-- **You're running on a system with a custom kernel** (e.g., Secure Kernel / VBS mode). Some Virtualization-Based Security configurations intercept syscalls at a level below what any userland technique can touch.
+#### Layer 1: Kernel callbacks (ETW, PsSetCreateProcessNotifyRoutine, etc.)
 
-- **CrowdStrike Falcon is present with full hook replacement.** As noted above, some CrowdStrike configurations replace rather than hook the stubs. You'll need the Clean-nTDLL mapping variant.
+Most EDRs register kernel callbacks that fire after the syscall completes. Direct syscalls don't avoid these — they happen in ring 0 regardless of how you called the kernel.
+
+**What they see:** the syscall number, the arguments, the calling process.
+**What they don't see:** the Win32 function name, the call stack through ntdll.
+
+**How to mitigate:**
+- Batch allocations into fewer, larger calls (reduces event volume)
+- Chain shellcode delivery through reflective DLL loading instead of per-API calls
+- Use `NtSetInformationProcess` to disable ETW for your process before injection calls
+- Time your calls with realistic delays between them (an injection that completes in 2ms is obvious)
+- Spoof the calling thread's start address so the kernel callback sees a legitimate entry point
+
+#### Layer 2: Secure Kernel / VBS
+
+Virtualization-Based Security runs a hypervisor below the kernel. It can intercept every syscall at the VMExit level. There is no userland bypass for this.
+
+**If VBS is enabled, direct syscalls still work** — they just don't help you hide from the hypervisor. The EDR watching from VBS sees every syscall with full fidelity.
+
+**How to deal with it:**
+- Hades Gate still gives you cross-version compat and avoids userland hooks. It's not useless under VBS — it's just not invisible.
+- Combine with ETW disable and call-spoofing to reduce the signal your process emits at userland, making it harder to distinguish from legitimate behavior even when VBS is watching.
+- If absolute invisibility is required under VBS, you need hardware-level techniques (Secure Kernel bypasses) that are outside the scope of any userland tool.
+
+#### #### Layer 3: Full stub replacement (CrowdStrike Falcon, some SentinelOne configs)
+
+These EDRs don't just hook the first bytes — they overwrite the entire syscall stub with a jmp to a completely fake function. The SSN at byte [4] is gone.
+
+**How Hades Gate handles this:**
+- Call `hg_resolve()` first, then `hg_verify_stub()`. If the stub doesn't look like a syscall stub, fall back to `hg_map_clean_ntdll()` + `hg_resolve_at()` (Section 7.1).
+- `hg_verify_stub()` checks for the presence of `0F 05 C3` (syscall; ret) within the first 16 bytes. If absent, the EDR has replaced the stub.
+- `hg_map_clean_ntdll()` maps a fresh copy of ntdll.dll from disk, then `hg_resolve_at()` extracts SSNs from the real stubs.
+
+```c
+HG_RESOLVED r = hg_resolve("NtAllocateVirtualMemory");
+if (!hg_verify_stub(r.address)) {
+    // Stub appears replaced — try clean ntdll from disk
+    uintptr_t clean_base = hg_map_clean_ntdll();
+    r = hg_resolve_at("NtAllocateVirtualMemory", clean_base);
+}
+void* stub = hg_build_stub(r.ssn);
+```
+
+### Bottom line
+
+Hades Gate is a userland hook bypass. Nothing more, nothing less. If the EDR is watching from ring 0 or below, direct syscalls are still useful — they eliminate the most common detection vector (function hooking) — but they are not a complete stealth solution. Pair with ETW disable, call spoofing, and behavioral timing for a fuller picture.
 
 ---
 
@@ -407,6 +449,22 @@ Steps:
 ```
 
 The in-memory ntdll may have fake stubs, but the on-disk copy is always clean.
+
+**Updated API usage:**
+
+```c
+// Before: only resolves from in-memory ntdll
+HG_RESOLVED r = hg_resolve("NtAllocateVirtualMemory");
+
+// Now: verify the stub is real, fall back to clean copy
+if (!hg_verify_stub(r.address)) {
+    // EDR replaced the stub — map from disk
+    uintptr_t clean = hg_map_clean_ntdll();
+    r = hg_resolve_at("NtAllocateVirtualMemory", clean);
+}
+
+void* stub = hg_build_stub(r.ssn);
+```
 
 ### 7.2 Indirect Syscalls
 
@@ -486,5 +544,12 @@ __writegsqword(0x18, 0); // Clear DR1
 
 ---
 
+## 10. License
+
+This is free software. Do what you want with it. No warranty, express or implied.
+
+The Windows kernel is the only authority. Go directly to it. Do not pass EDR. Do not collect 0-day.
+
+---
 
 > ⛧ *Hades Gate - Church of Malware - MCMLXXXIV* ⛧
